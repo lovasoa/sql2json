@@ -1,5 +1,5 @@
 [package]
-name = "wikipedia-externallinks-fast-extraction"
+name = "sql2json"
 version = "0.1.3"
 authors = ["Ophir LOJKINE <o.lojkine@qwant.com>"]
 

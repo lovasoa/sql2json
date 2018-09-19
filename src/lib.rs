@@ -17,19 +17,18 @@ use nom_sql::CreateTableStatement;
 use nom_sql::ColumnSpecification;
 use nom_sql::Column;
 
-struct TargetColumn<'a> {
-    name: &'a str,
-    table: &'a str
-}
+type TableName = String;
+type TableColumns = Vec<String>;
+type InsertData = Vec<Vec<Literal>>;
 
-const TARGET_COLUMN: TargetColumn<'static> = TargetColumn {
-    name: "el_to",
-    table: "externallinks"
-};
+struct TableSchema {
+    name: TableName,
+    columns: TableColumns
+}
 
 enum ExtractedSql {
     InsertData(Vec<Vec<Literal>>),
-    CreateTableData(usize),
+    CreateTableData(TableSchema),
     Error(String),
 }
 
@@ -50,14 +49,10 @@ fn extract_data(query: SqlQuery) -> ExtractedSql {
                         fields,
                         ..
                     }) => {
-            if name == TARGET_COLUMN.table {
-                match find_target_field_index(fields) {
-                    Some(i) => ExtractedSql::CreateTableData(i),
-                    None => ExtractedSql::Error(format!("Target field not found"))
-                }
-            } else {
-                ExtractedSql::Error(format!("Wrong table: '{}'", name))
-            }
+            let columns = fields.into_iter()
+                .map(|ColumnSpecification { column: Column { name, .. }, .. }| name)
+                .collect();
+            CreateTableData(TableSchema {name: name, columns: columns})
         }
         parsed => {
             ExtractedSql::Error(format!("Not an import statement: {:?}", parsed))
@@ -65,27 +60,12 @@ fn extract_data(query: SqlQuery) -> ExtractedSql {
     }
 }
 
-fn find_target_field_index(fields: Vec<ColumnSpecification>) -> Option<usize> {
-    fields.iter()
-        .position(|spec| {
-            let ColumnSpecification {
-                column: Column { name, .. },
-                ..
-            } = spec;
-            name == TARGET_COLUMN.name
-        })
-}
-
-fn extract_target_string(mut values: Vec<Literal>, target: usize) -> Result<String, String> {
-    if values.len() <= target {
-        Err(format!("Too few inserted values: {:?}", values))
+fn extract_target_string(mut values: Vec<Literal>, schema: TableSchema) -> Result<String, String> {
+    if values.len() != schema.len {
+        Err(format!("Bad number of inserted values: {:?}", values))
     } else {
-        match values.swap_remove(target) {
-            Literal::String(s) => Ok(s),
-            non_string_val => {
-                Err(format!("Invalid inserted value type: {:?} (at index {})", non_string_val, target))
-            }
-        }
+        // TODO
+        "TODO"
     }
 }
 
@@ -114,20 +94,20 @@ fn is_complete_statement(statement: &Vec<u8>) -> bool {
 #[derive(Debug)]
 struct ScanState {
     current_statement: Vec<u8>,
-    target_field: Option<usize>,
+    schema: HashMap<TableName, TableColumns>,
 }
 
 enum ScanLineAction {
     Pass,
     ReportError(String),
-    ExtractFrom(Vec<Vec<Literal>>, usize),
+    ExtractFrom(InsertData, TableSchema),
 }
 
 impl ScanState {
     fn new() -> ScanState {
         ScanState {
             current_statement: Vec::with_capacity(1_000_000),
-            target_field: None,
+            schema: HashMap::new(),
         }
     }
 
@@ -137,28 +117,28 @@ impl ScanState {
         } else {
             self.current_statement.append(line_bytes);
             if is_complete_statement(&self.current_statement) {
-                let parsed_sql = parser::parse_query_bytes(&self.current_statement);
-                let scan_result = match parsed_sql {
-                    Ok(sql) => match extract_data(sql) {
-                        InsertData(data) => {
-                            if let Some(i) = self.target_field {
-                                ScanLineAction::ExtractFrom(data, i)
-                            } else {
-                                ScanLineAction::ReportError("Insert statement before create table".into())
-                            }
-                        },
-                        ExtractedSql::CreateTableData(index) => {
-                            self.target_field = Some(index);
-                            ScanLineAction::Pass
-                        },
-                        ExtractedSql::Error(err) => ScanLineAction::ReportError(err),
-                    },
-                    Err(s) => ScanLineAction::ReportError(format!("Unable to parse as SQL: '{}' ({})", 
-                            std::str::from_utf8(&self.current_statement).unwrap_or("invalid utf8"), s))
-                };
+                let scan_result = self.scan_result();
                 self.current_statement.clear();
                 scan_result
             } else { ScanLineAction::Pass }
+        }
+    }
+
+    fn scan_result(&mut self) -> ScanLineAction {
+        let parsed_sql = parser::parse_query_bytes(&self.current_statement);
+        match parsed_sql {
+            Ok(sql) => match extract_data(sql) {
+                InsertData(data) => {
+                    ScanLineAction::ExtractFrom(data, &self.schema)
+                },
+                ExtractedSql::CreateTableData(index) => {
+                    self.target_field = Some(index);
+                    ScanLineAction::Pass
+                },
+                ExtractedSql::Error(err) => ScanLineAction::ReportError(err),
+            },
+            Err(s) => ScanLineAction::ReportError(format!("Unable to parse as SQL: '{}' ({})", 
+                    std::str::from_utf8(&self.current_statement).unwrap_or("invalid utf8"), s))
         }
     }
 }
